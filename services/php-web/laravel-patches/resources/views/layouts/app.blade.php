@@ -6,6 +6,7 @@
   <title>Space Dashboard</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel='stylesheet' href='/css/animations.css'>
   <style>#map{height:340px}</style>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -18,7 +19,9 @@
     <a class="nav-link" href="/osdr">OSDR</a>
   </div>
 </nav>
-@yield('content')
+<div class="fade-in">
+    @yield('content')
+</div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
