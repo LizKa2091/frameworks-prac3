@@ -1,0 +1,23 @@
+.card {
+    background: #10131a;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+    box-shadow: 0 0 15px rgba(0,0,0,0.3);
+    color: #fff;
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+.table-nice {
+    background: #0d1117;
+    color: #eee;
+}
+
+.table-nice thead {
+    background: #161b22;
+}
