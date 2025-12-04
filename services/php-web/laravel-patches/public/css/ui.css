@@ -5,6 +5,12 @@
     margin-bottom: 20px;
     box-shadow: 0 0 15px rgba(0,0,0,0.3);
     color: #fff;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
 }
 
 .grid-2 {
@@ -16,8 +22,86 @@
 .table-nice {
     background: #0d1117;
     color: #eee;
+    border-collapse: separate;
+    border-spacing: 0;
 }
 
 .table-nice thead {
     background: #161b22;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.table-nice tbody tr {
+    transition: background-color 0.2s ease;
+}
+
+.table-nice tbody tr:hover {
+    background-color: #1a1f28;
+}
+
+.table-nice th,
+.table-nice td {
+    padding: 12px;
+    border-bottom: 1px solid #21262d;
+}
+
+.table-nice th {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+    letter-spacing: 0.5px;
+}
+
+.filter-controls {
+    background: #161b22;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.search-box {
+    position: relative;
+}
+
+.search-box input {
+    padding-left: 40px;
+}
+
+.search-box::before {
+    content: "🔍";
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+}
+
+.sortable-header {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    padding-right: 20px;
+}
+
+.sortable-header:hover {
+    background-color: #21262d;
+}
+
+.sortable-header::after {
+    content: "⇅";
+    position: absolute;
+    right: 5px;
+    opacity: 0.5;
+}
+
+.sortable-header.asc::after {
+    content: "↑";
+    opacity: 1;
+}
+
+.sortable-header.desc::after {
+    content: "↓";
+    opacity: 1;
 }
