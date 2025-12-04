@@ -112,4 +112,8 @@ class DashboardController extends Controller
             'items'  => $items,
         ]);
     }
+
+    public function jwstPage() {
+      return view('jwst');
+    }
 }

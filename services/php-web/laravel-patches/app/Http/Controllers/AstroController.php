@@ -50,4 +50,8 @@ class AstroController extends Controller
         $json = json_decode($raw, true);
         return response()->json($json ?? ['raw' => $raw]);
     }
+
+    public function index() {
+      return view('astro');
+    }
 }
