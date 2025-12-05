@@ -22,3 +22,7 @@ use App\Http\Controllers\AstroController;
 
 // повторяющийся маршрут
 Route::get('/page/{slug}', [\App\Http\Controllers\CmsController::class, 'page']);
+
+// Legacy CSV визуализация
+Route::get('/legacy/csv', [\App\Http\Controllers\LegacyController::class, 'csvView']);
+Route::get('/legacy/csv/content', [\App\Http\Controllers\LegacyController::class, 'csvContent']);
