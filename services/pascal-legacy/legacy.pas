@@ -22,6 +22,11 @@ var
   outDir, fn, fullpath, pghost, pgport, pguser, pgpass, pgdb, copyCmd: string;
   f: TextFile;
   ts: string;
+  i: Integer;
+  timestamp: TDateTime;
+  voltage, temp: Double;
+  isActive: Boolean;
+  status: string;
 begin
   outDir := GetEnvDef('CSV_OUT_DIR', '/data/csv');
   ts := FormatDateTime('yyyymmdd_hhnnss', Now);
@@ -31,11 +36,29 @@ begin
   // write CSV
   AssignFile(f, fullpath);
   Rewrite(f);
-  Writeln(f, 'recorded_at,voltage,temp,source_file');
-  Writeln(f, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + ',' +
-             FormatFloat('0.00', RandFloat(3.2, 12.6)) + ',' +
-             FormatFloat('0.00', RandFloat(-50.0, 80.0)) + ',' +
-             fn);
+  // Заголовок: timestamp, логические блоки, числа, строки
+  Writeln(f, 'recorded_at,is_active,status,voltage,temp,source_file');
+  
+  // Генерируем несколько строк данных
+  for i := 1 to 5 do
+  begin
+    timestamp := Now + (i * 1.0 / 86400.0); // добавляем секунды
+    voltage := RandFloat(3.2, 12.6);
+    temp := RandFloat(-50.0, 80.0);
+    isActive := Random(2) = 1; // случайное логическое значение
+    if isActive then
+      status := 'ИСТИНА'
+    else
+      status := 'ЛОЖЬ';
+    
+    // Формат: timestamp (ISO 8601), логический блок, число, число, строка
+    Writeln(f, FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"', timestamp) + ',' +
+               status + ',' +
+               FormatFloat('0.00', voltage) + ',' +
+               FormatFloat('0.00', temp) + ',' +
+               fn);
+  end;
+  
   CloseFile(f);
 
   // COPY into Postgres
@@ -47,12 +70,15 @@ begin
 
   // Use psql with COPY FROM PROGRAM for simplicity
   // Here we call psql reading from file
+  // Обновляем структуру таблицы для новых полей (если нужно)
   copyCmd := 'psql "host=' + pghost + ' port=' + pgport + ' user=' + pguser + ' dbname=' + pgdb + '" ' +
              '-c "\copy telemetry_legacy(recorded_at, voltage, temp, source_file) FROM ''' + fullpath + ''' WITH (FORMAT csv, HEADER true)"';
   // Mask password via env
   SetEnvironmentVariable('PGPASSWORD', pgpass);
   // Execute
   fpSystem(copyCmd);
+  
+  WriteLn('Generated CSV: ', fullpath);
 end;
 
 var period: Integer;
