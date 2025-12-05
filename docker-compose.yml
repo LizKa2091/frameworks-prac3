@@ -27,18 +27,34 @@ services:
     ports:
       - "5432:5432"
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis_cache
+    networks:
+      - backend
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   rust_iss:
     build:
       context: ./services/rust-iss
     container_name: rust_iss
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://monouser:monopass@db:5432/monolith}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       NASA_API_URL: ${NASA_API_URL:-}
       NASA_API_KEY: ${NASA_API_KEY:-}
       FETCH_EVERY_SECONDS: ${FETCH_EVERY_SECONDS:-600}
       WHERE_ISS_URL: ${WHERE_ISS_URL:-https://api.wheretheiss.at/v1/satellites/25544}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - backend
