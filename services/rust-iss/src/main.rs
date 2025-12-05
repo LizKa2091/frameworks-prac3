@@ -12,6 +12,10 @@ use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use tower::ServiceBuilder;
+use tower_http::limit::RateLimitLayer;
+use redis::Client as RedisClient;
+use validator::{Validate, ValidationError};
 
 #[derive(Serialize)]
 struct Health { status: &'static str, now: DateTime<Utc> }
@@ -19,6 +23,7 @@ struct Health { status: &'static str, now: DateTime<Utc> }
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+    redis: Option<redis::Client>,
     nasa_url: String,          // OSDR
     nasa_key: String,          // ключ NASA
     fallback_url: String,      // ISS where-the-iss
@@ -28,6 +33,25 @@ struct AppState {
     every_neo: u64,
     every_donki: u64,
     every_spacex: u64,
+}
+
+// Валидационные структуры
+#[derive(Debug, Validate)]
+struct IssQueryParams {
+    #[validate(range(min = 1, max = 1000))]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Validate)]
+struct OsdrQueryParams {
+    #[validate(range(min = 1, max = 100))]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Validate)]
+struct SpaceQueryParams {
+    #[validate(length(min = 1, max = 50))]
+    src: Option<String>,
 }
 
 #[tokio::main]
@@ -58,8 +82,14 @@ async fn main() -> anyhow::Result<()> {
     let pool = PgPoolOptions::new().max_connections(5).connect(&db_url).await?;
     init_db(&pool).await?;
 
+    // Redis подключение
+    let redis_client = std::env::var("REDIS_URL")
+        .ok()
+        .and_then(|url| RedisClient::open(url).ok());
+
     let state = AppState {
         pool: pool.clone(),
+        redis: redis_client,
         nasa_url: nasa_url.clone(),
         nasa_key,
         fallback_url: fallback_url.clone(),
@@ -127,10 +157,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Rate limit: 100 запросов в минуту
+    let rate_limit = RateLimitLayer::new(100, Duration::from_secs(60));
+
     let app = Router::new()
         // общее
         .route("/health", get(|| async { Json(Health { status: "ok", now: Utc::now() }) }))
-        .with_state(state.clone())
         // ISS
         .route("/last", get(last_iss))
         .route("/fetch", get(trigger_iss))
@@ -142,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/space/:src/latest", get(space_latest))
         .route("/space/refresh", get(space_refresh))
         .route("/space/summary", get(space_summary))
+        .layer(ServiceBuilder::new().layer(rate_limit))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3000)).await?;
@@ -308,10 +341,20 @@ async fn osdr_sync(State(st): State<AppState>)
     Ok(Json(serde_json::json!({ "written": written })))
 }
 
-async fn osdr_list(State(st): State<AppState>)
+async fn osdr_list(Query(params): Query<HashMap<String, String>>, State(st): State<AppState>)
 -> Result<Json<Value>, (StatusCode, String)> {
-    let limit =  std::env::var("OSDR_LIST_LIMIT").ok()
-        .and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+    // Валидация параметров
+    let limit_param = params.get("limit")
+        .and_then(|s| s.parse::<u32>().ok());
+    
+    let query_params = OsdrQueryParams { limit: limit_param };
+    if let Err(e) = query_params.validate() {
+        return Err((StatusCode::BAD_REQUEST, format!("Validation error: {:?}", e)));
+    }
+    
+    let limit = limit_param.map(|l| l as i64)
+        .unwrap_or_else(|| std::env::var("OSDR_LIST_LIMIT").ok()
+            .and_then(|s| s.parse::<i64>().ok()).unwrap_or(20));
 
     let rows = sqlx::query(
         "SELECT id, dataset_id, title, status, updated_at, inserted_at, raw
@@ -340,6 +383,11 @@ async fn osdr_list(State(st): State<AppState>)
 
 async fn space_latest(Path(src): Path<String>, State(st): State<AppState>)
 -> Result<Json<Value>, (StatusCode, String)> {
+    // Валидация параметров
+    let query_params = SpaceQueryParams { src: Some(src.clone()) };
+    if let Err(e) = query_params.validate() {
+        return Err((StatusCode::BAD_REQUEST, format!("Validation error: {:?}", e)));
+    }
     let row = sqlx::query(
         "SELECT fetched_at, payload FROM space_cache
          WHERE source = $1 ORDER BY id DESC LIMIT 1"
@@ -371,21 +419,38 @@ async fn space_refresh(Query(q): Query<HashMap<String,String>>, State(st): State
     Ok(Json(serde_json::json!({ "refreshed": done })))
 }
 
-async fn latest_from_cache(pool: &PgPool, src: &str) -> Value {
+async fn latest_from_cache(pool: &PgPool, redis: &Option<redis::Client>, src: &str) -> Value {
+    // Попытка получить из Redis
+    if let Some(redis_client) = redis {
+        if let Ok(mut conn) = redis_client.get_async_connection().await {
+            let key = format!("space_cache:{}", src);
+            if let Ok(Some(json_str)): Result<Option<String>, _> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+            {
+                if let Ok(payload) = serde_json::from_str::<Value>(&json_str) {
+                    return serde_json::json!({"at": Utc::now(), "payload": payload, "from": "redis"});
+                }
+            }
+        }
+    }
+    
+    // Fallback на PostgreSQL
     sqlx::query("SELECT fetched_at, payload FROM space_cache WHERE source=$1 ORDER BY id DESC LIMIT 1")
         .bind(src)
         .fetch_optional(pool).await.ok().flatten()
-        .map(|r| serde_json::json!({"at": r.get::<DateTime<Utc>,_>("fetched_at"), "payload": r.get::<Value,_>("payload")}))
+        .map(|r| serde_json::json!({"at": r.get::<DateTime<Utc>,_>("fetched_at"), "payload": r.get::<Value,_>("payload"), "from": "postgres"}))
         .unwrap_or(serde_json::json!({}))
 }
 
 async fn space_summary(State(st): State<AppState>)
 -> Result<Json<Value>, (StatusCode, String)> {
-    let apod   = latest_from_cache(&st.pool, "apod").await;
-    let neo    = latest_from_cache(&st.pool, "neo").await;
-    let flr    = latest_from_cache(&st.pool, "flr").await;
-    let cme    = latest_from_cache(&st.pool, "cme").await;
-    let spacex = latest_from_cache(&st.pool, "spacex").await;
+    let apod   = latest_from_cache(&st.pool, &st.redis, "apod").await;
+    let neo    = latest_from_cache(&st.pool, &st.redis, "neo").await;
+    let flr    = latest_from_cache(&st.pool, &st.redis, "flr").await;
+    let cme    = latest_from_cache(&st.pool, &st.redis, "cme").await;
+    let spacex = latest_from_cache(&st.pool, &st.redis, "spacex").await;
 
     let iss_last = sqlx::query("SELECT fetched_at,payload FROM iss_fetch_log ORDER BY id DESC LIMIT 1")
         .fetch_optional(&st.pool).await.ok().flatten()
@@ -403,9 +468,25 @@ async fn space_summary(State(st): State<AppState>)
 
 /* ---------- Фетчеры и запись ---------- */
 
-async fn write_cache(pool: &PgPool, source: &str, payload: Value) -> anyhow::Result<()> {
+async fn write_cache(pool: &PgPool, redis: &Option<redis::Client>, source: &str, payload: Value) -> anyhow::Result<()> {
+    // Запись в PostgreSQL
     sqlx::query("INSERT INTO space_cache(source, payload) VALUES ($1,$2)")
-        .bind(source).bind(payload).execute(pool).await?;
+        .bind(source).bind(&payload).execute(pool).await?;
+    
+    // Кэширование в Redis (если доступен)
+    if let Some(redis_client) = redis {
+        if let Ok(mut conn) = redis_client.get_async_connection().await {
+            let key = format!("space_cache:{}", source);
+            let json_str = serde_json::to_string(&payload)?;
+            let _: Result<(), _> = redis::cmd("SETEX")
+                .arg(&key)
+                .arg(3600) // TTL 1 час
+                .arg(&json_str)
+                .query_async(&mut conn)
+                .await;
+        }
+    }
+    
     Ok(())
 }
 
@@ -416,7 +497,7 @@ async fn fetch_apod(st: &AppState) -> anyhow::Result<()> {
     let mut req = client.get(url).query(&[("thumbs","true")]);
     if !st.nasa_key.is_empty() { req = req.query(&[("api_key",&st.nasa_key)]); }
     let json: Value = req.send().await?.json().await?;
-    write_cache(&st.pool, "apod", json).await
+    write_cache(&st.pool, &st.redis, "apod", json).await
 }
 
 // NeoWs
@@ -431,7 +512,7 @@ async fn fetch_neo_feed(st: &AppState) -> anyhow::Result<()> {
     ]);
     if !st.nasa_key.is_empty() { req = req.query(&[("api_key",&st.nasa_key)]); }
     let json: Value = req.send().await?.json().await?;
-    write_cache(&st.pool, "neo", json).await
+    write_cache(&st.pool, &st.redis, "neo", json).await
 }
 
 // DONKI объединённая
@@ -447,7 +528,7 @@ async fn fetch_donki_flr(st: &AppState) -> anyhow::Result<()> {
     let mut req = client.get(url).query(&[("startDate",from),("endDate",to)]);
     if !st.nasa_key.is_empty() { req = req.query(&[("api_key",&st.nasa_key)]); }
     let json: Value = req.send().await?.json().await?;
-    write_cache(&st.pool, "flr", json).await
+    write_cache(&st.pool, &st.redis, "flr", json).await
 }
 async fn fetch_donki_cme(st: &AppState) -> anyhow::Result<()> {
     let (from,to) = last_days(5);
@@ -456,7 +537,7 @@ async fn fetch_donki_cme(st: &AppState) -> anyhow::Result<()> {
     let mut req = client.get(url).query(&[("startDate",from),("endDate",to)]);
     if !st.nasa_key.is_empty() { req = req.query(&[("api_key",&st.nasa_key)]); }
     let json: Value = req.send().await?.json().await?;
-    write_cache(&st.pool, "cme", json).await
+    write_cache(&st.pool, &st.redis, "cme", json).await
 }
 
 // SpaceX
@@ -464,7 +545,7 @@ async fn fetch_spacex_next(st: &AppState) -> anyhow::Result<()> {
     let url = "https://api.spacexdata.com/v4/launches/next";
     let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
     let json: Value = client.get(url).send().await?.json().await?;
-    write_cache(&st.pool, "spacex", json).await
+    write_cache(&st.pool, &st.redis, "spacex", json).await
 }
 
 fn last_days(n: i64) -> (String,String) {
